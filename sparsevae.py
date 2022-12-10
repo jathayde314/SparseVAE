@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torchvision import transforms, datasets
 from torchvision.utils import save_image, make_grid
 
-from modules import VectorQuantizedVAE, to_scalar
+from modules import SparseVAE, to_scalar
 from datasets import MiniImagenet
 
 from tensorboardX import SummaryWriter
@@ -14,47 +14,53 @@ def train(data_loader, model, optimizer, args, writer):
         images = images.to(args.device)
 
         optimizer.zero_grad()
-        x_tilde, z_e_x, z_q_x = model(images)
+        x_tilde, z_e_x, z_q_x, sparsity = model(images)
 
         # Reconstruction loss
         loss_recons = F.mse_loss(x_tilde, images)
-        # Vector quantization objective
-        loss_vq = F.mse_loss(z_q_x, z_e_x.detach())
+
         # Commitment objective
         loss_commit = F.mse_loss(z_e_x, z_q_x.detach())
 
-        loss = loss_recons + loss_vq + args.beta * loss_commit
+        # Encoding cross entropy loss (Prior is N(0,1) for sparse)
+        loss_encoding = F.mse_loss(z_q_x, torch.zeros(z_q_x.shape).cuda())
+
+        loss = loss_recons + 0.25 * loss_commit + loss_encoding
         loss.backward()
+
+        optimizer.step()
 
         # Logs
         writer.add_scalar('loss/train/reconstruction', loss_recons.item(), args.steps)
-        writer.add_scalar('loss/train/quantization', loss_vq.item(), args.steps)
+        writer.add_scalar('loss/train/quantization', loss_commit.item(), args.steps)
+        writer.add_scalar('loss/train/encoding', loss_encoding.item(), args.steps)
+        writer.add_scalar('loss/train/sparsity', sparsity.item(), args.steps)
 
         optimizer.step()
         args.steps += 1
 
 def test(data_loader, model, args, writer):
     with torch.no_grad():
-        loss_recons, loss_vq = 0., 0.
+        loss_recons, sparsity = 0., 0.
         for images, _ in data_loader:
             images = images.to(args.device)
-            x_tilde, z_e_x, z_q_x = model(images)
+            x_tilde, z_e_x, z_q_x, sparse = model(images)
             loss_recons += F.mse_loss(x_tilde, images)
-            loss_vq += F.mse_loss(z_q_x, z_e_x)
+            sparsity += sparse
 
         loss_recons /= len(data_loader)
-        loss_vq /= len(data_loader)
+        sparsity /= len(data_loader)
 
     # Logs
     writer.add_scalar('loss/test/reconstruction', loss_recons.item(), args.steps)
-    writer.add_scalar('loss/test/quantization', loss_vq.item(), args.steps)
+    writer.add_scalar('loss/test/sparsity', sparsity.item(), args.steps)
 
-    return loss_recons.item(), loss_vq.item()
+    return loss_recons.item(), sparsity.item()
 
 def generate_samples(images, model, args):
     with torch.no_grad():
         images = images.to(args.device)
-        x_tilde, _, _ = model(images)
+        x_tilde, _, _, _ = model(images)
     return x_tilde
 
 def main(args):
@@ -118,7 +124,7 @@ def main(args):
     fixed_grid = make_grid(fixed_images, nrow=8, range=(-1, 1), normalize=True)
     writer.add_image('original', fixed_grid, 0)
 
-    model = VectorQuantizedVAE(num_channels, args.hidden_size, args.k).to(args.device)
+    model = SparseVAE(num_channels, args.hidden_size, args.k).to(args.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # Generate the samples first once
@@ -129,15 +135,14 @@ def main(args):
     best_loss = -1.
     for epoch in range(args.num_epochs):
         train(train_loader, model, optimizer, args, writer)
-        loss, _ = test(valid_loader, model, args, writer)
+        loss, sparsity = test(valid_loader, model, args, writer)
 
         reconstruction = generate_samples(fixed_images, model, args)
         grid = make_grid(reconstruction.cpu(), nrow=8, range=(-1, 1), normalize=True)
         writer.add_image('reconstruction', grid, epoch + 1)
-        generated_grid = model.generate(16, dim = args.hidden_size, K = args.k)
+        generated_grid = model.generate(16, int(sparsity), args.k, args.hidden_size)
         gen_grid = make_grid(generated_grid.cpu(), nrow=8, range=(-1, 1), normalize=True)
         writer.add_image('generated', gen_grid, epoch + 1)
-
 
 if __name__ == '__main__':
     import argparse

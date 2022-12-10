@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.distributions.normal import Normal
 from torch.distributions import kl_divergence
 
 from functions import vq, vq_st
+from sparse_dict import SparseDict
+
 
 def to_scalar(arr):
     if type(arr) == list:
@@ -71,7 +72,7 @@ class VQEmbedding(nn.Module):
     def __init__(self, K, D):
         super().__init__()
         self.embedding = nn.Embedding(K, D)
-        self.embedding.weight.data.uniform_(-1./K, 1./K)
+        self.embedding.weight.data.uniform_(-1. / K, 1. / K)
 
     def forward(self, z_e_x):
         z_e_x_ = z_e_x.permute(0, 2, 3, 1).contiguous()
@@ -84,7 +85,7 @@ class VQEmbedding(nn.Module):
         z_q_x = z_q_x_.permute(0, 3, 1, 2).contiguous()
 
         z_q_x_bar_flatten = torch.index_select(self.embedding.weight,
-            dim=0, index=indices)
+                                               dim=0, index=indices)
         z_q_x_bar_ = z_q_x_bar_flatten.view_as(z_e_x_)
         z_q_x_bar = z_q_x_bar_.permute(0, 3, 1, 2).contiguous()
 
@@ -150,127 +151,60 @@ class VectorQuantizedVAE(nn.Module):
         x_tilde = self.decoder(z_q_x_st)
         return x_tilde, z_e_x, z_q_x
 
+    def generate(self, n, dim, K):
+        latents = torch.randint(0, K, (n, dim, 8)).cuda()
+        with torch.no_grad():
+            return self.decode(latents)
 
-class GatedActivation(nn.Module):
-    def __init__(self):
+
+class SparseVAE(nn.Module):
+    def __init__(self, input_dim, dim, K=512):
         super().__init__()
-
-    def forward(self, x):
-        x, y = x.chunk(2, dim=1)
-        return F.tanh(x) * F.sigmoid(y)
-
-
-class GatedMaskedConv2d(nn.Module):
-    def __init__(self, mask_type, dim, kernel, residual=True, n_classes=10):
-        super().__init__()
-        assert kernel % 2 == 1, print("Kernel size must be odd")
-        self.mask_type = mask_type
-        self.residual = residual
-
-        self.class_cond_embedding = nn.Embedding(
-            n_classes, 2 * dim
-        )
-
-        kernel_shp = (kernel // 2 + 1, kernel)  # (ceil(n/2), n)
-        padding_shp = (kernel // 2, kernel // 2)
-        self.vert_stack = nn.Conv2d(
-            dim, dim * 2,
-            kernel_shp, 1, padding_shp
-        )
-
-        self.vert_to_horiz = nn.Conv2d(2 * dim, 2 * dim, 1)
-
-        kernel_shp = (1, kernel // 2 + 1)
-        padding_shp = (0, kernel // 2)
-        self.horiz_stack = nn.Conv2d(
-            dim, dim * 2,
-            kernel_shp, 1, padding_shp
-        )
-
-        self.horiz_resid = nn.Conv2d(dim, dim, 1)
-
-        self.gate = GatedActivation()
-
-    def make_causal(self):
-        self.vert_stack.weight.data[:, :, -1].zero_()  # Mask final row
-        self.horiz_stack.weight.data[:, :, :, -1].zero_()  # Mask final column
-
-    def forward(self, x_v, x_h, h):
-        if self.mask_type == 'A':
-            self.make_causal()
-
-        h = self.class_cond_embedding(h)
-        h_vert = self.vert_stack(x_v)
-        h_vert = h_vert[:, :, :x_v.size(-1), :]
-        out_v = self.gate(h_vert + h[:, :, None, None])
-
-        h_horiz = self.horiz_stack(x_h)
-        h_horiz = h_horiz[:, :, :, :x_h.size(-2)]
-        v2h = self.vert_to_horiz(h_vert)
-
-        out = self.gate(v2h + h_horiz + h[:, :, None, None])
-        if self.residual:
-            out_h = self.horiz_resid(out) + x_h
-        else:
-            out_h = self.horiz_resid(out)
-
-        return out_v, out_h
-
-
-class GatedPixelCNN(nn.Module):
-    def __init__(self, input_dim=256, dim=64, n_layers=15, n_classes=10):
-        super().__init__()
-        self.dim = dim
-
-        # Create embedding layer to embed input
-        self.embedding = nn.Embedding(input_dim, dim)
-
-        # Building the PixelCNN layer by layer
-        self.layers = nn.ModuleList()
-
-        # Initial block with Mask-A convolution
-        # Rest with Mask-B convolutions
-        for i in range(n_layers):
-            mask_type = 'A' if i == 0 else 'B'
-            kernel = 7 if i == 0 else 3
-            residual = False if i == 0 else True
-
-            self.layers.append(
-                GatedMaskedConv2d(mask_type, dim, kernel, residual, n_classes)
-            )
-
-        # Add the output layer
-        self.output_conv = nn.Sequential(
-            nn.Conv2d(dim, 512, 1),
+        self.encoder = nn.Sequential(
+            nn.Conv2d(input_dim, dim, 4, 2, 1),
+            nn.BatchNorm2d(dim),
             nn.ReLU(True),
-            nn.Conv2d(512, input_dim, 1)
+            nn.Conv2d(dim, dim, 4, 2, 1),
+            ResBlock(dim),
+            ResBlock(dim),
+        )
+
+        self.sparse_dict = SparseDict(K=K, D=8 * 8 * dim)
+
+        self.decoder = nn.Sequential(
+            ResBlock(dim),
+            ResBlock(dim),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(dim, dim, 4, 2, 1),
+            nn.BatchNorm2d(dim),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(dim, input_dim, 4, 2, 1),
+            nn.Tanh()
         )
 
         self.apply(weights_init)
 
-    def forward(self, x, label):
-        shp = x.size() + (-1, )
-        x = self.embedding(x.view(-1)).view(shp)  # (B, H, W, C)
-        x = x.permute(0, 3, 1, 2)  # (B, C, W, W)
+    def encode(self, x):
+        z_e_x = self.encoder(x)
+        latents, sparsity = self.sparse_dict(z_e_x)
+        return latents
 
-        x_v, x_h = (x, x)
-        for i, layer in enumerate(self.layers):
-            x_v, x_h = layer(x_v, x_h, label)
+    def decode(self, latents, dim):
+        z_q_x = latents.mm(self.sparse_dict.dictionary.t())
+        x_tilde = self.decoder(z_q_x.view((latents.shape[0], dim, 8, 8)))
+        return x_tilde
 
-        return self.output_conv(x_h)
+    def forward(self, x):
+        z_e_x = self.encoder(x)
+        z_q_x, sparsity = self.sparse_dict(z_e_x)
+        x_tilde = self.decoder(z_q_x)
+        return x_tilde, z_e_x, z_q_x, sparsity
 
-    def generate(self, label, shape=(8, 8), batch_size=64):
-        param = next(self.parameters())
-        x = torch.zeros(
-            (batch_size, *shape),
-            dtype=torch.int64, device=param.device
-        )
-
-        for i in range(shape[0]):
-            for j in range(shape[1]):
-                logits = self.forward(x, label)
-                probs = F.softmax(logits[:, :, i, j], -1)
-                x.data[:, i, j].copy_(
-                    probs.multinomial(1).squeeze().data
-                )
-        return x
+    def generate(self, n, sparse, k, dim):
+        sparse_numbers = torch.normal(mean=0, std=1, size=(n, sparse)).cuda()
+        sparse_indices = torch.randint(high=dim, size=(n, sparse)).cuda()
+        z = torch.zeros((n, k)).cuda()
+        for i in range(z.shape[0]):
+            z[i, sparse_indices[i]] += sparse_numbers[i]
+        with torch.no_grad():
+            return self.decode(z, dim)
