@@ -1,48 +1,23 @@
-## Reproducing Neural Discrete Representation Learning
-### Course Project for [IFT 6135 - Representation Learning](https://ift6135h18.wordpress.com/)
+## Sparse VAE
+### Course Final Project
 
 Project Report link: [final_project.pdf](final_project.pdf)
 
 ### Instructions
-1. To train the VQVAE with default arguments as discussed in the report, execute:
+1. To train the SparseVAE
 ```
-python vqvae.py --data-folder /tmp/miniimagenet --output-folder models/vqvae
+python sparsevae.py --data-folder /tmp/miniimagenet --output-folder models/sparsevae
 ```
-2. To train the PixelCNN prior on the latents, execute:
-```
-python pixelcnn_prior.py --data-folder /tmp/miniimagenet --model models/vqvae --output-folder models/pixelcnn_prior
-```
-### Datasets Tested
-#### Image
-1. MNIST
-2. FashionMNIST
-3. CIFAR10
-4. Mini-ImageNet
 
-#### Video
-1. Atari 2600 - Boxing (OpenAI Gym) [code](https://github.com/ritheshkumar95/pytorch-vqvae/tree/evan/video)
+### Overview
+This project extends the VAE framework by attempting to train a Sparse Dictionary between 
 
-### Reconstructions from VQ-VAE
-Top 4 rows are Original Images. Bottom 4 rows are Reconstructions.
-#### MNIST
-![png](samples/vqvae_reconstructions_MNIST.png)
-#### Fashion MNIST
-![png](samples/vqvae_reconstructions_FashionMNIST.png)
-
-### Class-conditional samples from VQVAE with PixelCNN prior on the latents
-#### MNIST
-![png](samples/samples_MNIST.png)
-#### Fashion MNIST
-![png](samples/samples_FashionMNIST.png)
-
-### Comments
-1. We noticed that implementing our own VectorQuantization PyTorch function speeded-up training of VQ-VAE by nearly 3x. The slower, but simpler code is in this [commit](https://github.com/ritheshkumar95/pytorch-vqvae/tree/cde142670f701e783f29e9c815f390fc502532e8).
-2. We added some basic tests for the vector quantization functions (based on `pytest`). To run these tests
-```
-py.test . -vv
-```
+### Comment
+The method developed here has notable drawbacks in that it enforces limited sparsity and does not improve performance while requiring an extra order `d` more runtime to iterate over each dimension of the latent space. For a better way to implement a Sparse VAE, refer to https://arxiv.org/abs/2110.10804. Note that this paper was published after I submitted this project.
 
 ### Authors
-1. Rithesh Kumar
-2. Tristan Deleu
-3. Evan Racah
+Joshua Athayde
+
+### Acknowledgements
+I would like to thank Rithesh Kumar, Tristan Deleu, and Evan Racah for reproducing the VAE framework in Pytorch and making it publicly available. The work in this repository extends their code to attempt this new task.
+
